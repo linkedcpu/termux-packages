@@ -1,134 +1,47 @@
-name: My Build & Verify Bootstrap
+# 工作流名字，在 Actions 页面显示
+name: 编译 bootstrap（含 Bergamot）
 
+# 只在你手动点按钮时触发
 on:
   workflow_dispatch:
     inputs:
       arch:
-        description: "架构 (aarch64/arm/i686/x86_64，逗号分隔)"
+        description: "选架构"
         default: "aarch64"
-      add_packages:
-        description: "额外包 (逗号分隔，可选)"
-        default: ""
-      verify_keyring:
-        description: "编译后校验 apt 密钥指纹"
-        default: "true"
-        type: boolean
+        type: choice
+        options:
+          - aarch64
+          - arm
+          - i686
+          - x86_64
+
+# 不给多余权限，安全
+permissions: {}
 
 jobs:
   build:
+    # 用 Ubuntu 最新版（需要 Docker）
     runs-on: ubuntu-latest
-    timeout-minutes: 180
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      # 第1步：拉取你的仓库代码
+      # submodules: recursive → Bergamot 的 Marian 子模块一起拉
+      - name: 拉代码
+        uses: actions/checkout@v7
         with:
-          fetch-depth: 1
+          submodules: recursive
 
-      - name: 安装依赖
+      # 第2步：从源码编译 bootstrap，把 bergamot 打进去
+      - name: 编译 bootstrap
         run: |
-          sudo apt update
-          sudo apt install -y \
-            bash curl jq xz-utils zip unzip \
-            gnupg ca-certificates \
-            docker.io
+          ./scripts/run-docker.sh ./scripts/build-bootstraps.sh \
+            --architectures ${{ github.event.inputs.arch || 'aarch64' }} \
+            --add bergamot-translator
 
-      - name: 启动 Docker
-        run: |
-          sudo systemctl start docker
-          docker info
-
-      - name: 从源码编译 bootstrap
-        run: |
-          ARCH_ARGS="${{ github.event.inputs.arch }}"
-          ADD_ARGS="${{ github.event.inputs.add_packages }}"
-
-          CMD="./scripts/build-bootstraps.sh --architectures ${ARCH_ARGS}"
-
-          if [ -n "${ADD_ARGS}" ]; then
-            CMD="${CMD} --add ${ADD_ARGS}"
-          fi
-
-          echo "执行: ${CMD}"
-          ./scripts/run-docker.sh ${CMD}
-
-      - name: 列出产物
-        run: |
-          ls -lh bootstrap-*.zip || true
-          ls -lh *.zip 2>/dev/null || true
-
-      - name: 校验 apt 密钥指纹 (防止指纹不对)
-        if: ${{ github.event.inputs.verify_keyring == 'true' }}
-        run: |
-          echo "========================================="
-          echo "  校验 termux-keyring 中的官方公钥指纹"
-          echo "========================================="
-
-          # 找到编译产出的 keyring 包或解压 bootstrap 检查
-          set +e
-
-          # 方法: 从 docker 容器里提取 termux-keyring 包里的公钥
-          CONTAINER_ID=$(docker create \
-            -v ${{ github.workspace }}:/workspace \
-            termux/package-builder:latest \
-            bash -c 'ls /workspace/bootstrap-*.zip 2>/dev/null || echo "no zip"')
-
-          # 检查 repo.json 里的官方密钥指纹
-          echo ""
-          echo "--- repo.json 中声明的密钥 ---"
-          cat repo.json | jq -r '.apt_signing_keys[]? // empty' 2>/dev/null || true
-
-          echo ""
-          echo "--- termux-keyring 包中的公钥指纹 ---"
-          # 找 keyring 目录
-          find . -path "*/termux-keyring*" -name "*.gpg" -o -name "*.asc" -o -name "*.pub" 2>/dev/null | head -20
-
-          # 直接检查 sources.list 默认指向
-          echo ""
-          echo "--- 默认 sources.list 内容 ---"
-          # 从 bootstrap zip 里提取检查
-          for zip in bootstrap-*.zip; do
-            [ -f "$zip" ] || continue
-            echo "检查: $zip"
-            # 看 zip 里有没有 sources.list
-            unzip -l "$zip" | grep -i "sources.list" || true
-            # 看 zip 里有没有 trusted.gpg
-            unzip -l "$zip" | grep -i "trusted\|gpg\|keyring" || true
-          done
-
-          echo ""
-          echo "✅ 校验完成: 如果你的 fork 没改 repo.json 和 keyring,"
-          echo "   bootstrap 里的公钥就是 Termux 官方的,"
-          echo "   pkg update 不会报指纹错误。"
-
-      - name: 上传 bootstrap zip
-        uses: actions/upload-artifact@v4
+      # 第3步：把编好的 zip 上传，方便下载
+      - name: 上传产物
+        uses: actions/upload-artifact@v7
         with:
-          name: bootstrap-${{ github.event.inputs.arch }}-${{ github.run_number }}
-          path: |
-            bootstrap-*.zip
-            *.zip
+          name: bootstrap-${{ github.event.inputs.arch || 'aarch64' }}
+          path: "*.zip"
           retention-days: 30
-
-      - name: 使用说明
-        run: |
-          echo ""
-          echo "========================================="
-          echo "  编译完成！使用步骤："
-          echo "========================================="
-          echo ""
-          echo "1. 下载上方 Artifact 里的 bootstrap-*.zip"
-          echo "2. 放到 termux-app/app/src/main/cpp/"
-          echo "3. 编辑 app/build.gradle:"
-          echo "   task downloadBootstraps() { return }"
-          echo "4. 编译 termux-app APK"
-          echo ""
-          echo "首次启动后验证源和密钥:"
-          echo "  pkg update"
-          echo "  apt-key list"
-          echo "  cat \$PREFIX/etc/apt/sources.list"
-          echo ""
-          echo "换清华源:"
-          echo "  pkg install termux-tools"
-          echo "  termux-change-repo"
-          echo ""
