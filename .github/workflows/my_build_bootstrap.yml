@@ -1,4 +1,4 @@
-name: Build & Verify Bootstrap
+name: My Build & Verify Bootstrap
 
 on:
   workflow_dispatch:
